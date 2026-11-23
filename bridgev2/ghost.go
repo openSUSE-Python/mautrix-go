@@ -144,6 +144,7 @@ func (a *Avatar) Reupload(ctx context.Context, intent MatrixAPI, currentHash [32
 type UserInfo struct {
 	Identifiers  []string
 	Name         *string
+	NameQuality  database.NameQuality // Ranks Name, see database.NameQuality
 	Avatar       *Avatar
 	IsBot        *bool
 	ExtraProfile database.ExtraProfile
@@ -151,18 +152,48 @@ type UserInfo struct {
 	ExtraUpdates ExtraUpdater[*Ghost]
 }
 
-func (ghost *Ghost) prepareName(name string) bool {
+// acceptsName returns whether a name of the given quality may replace the
+// current name of the ghost. Unranked names are always accepted, ranked names
+// only if they're at least as good as the current name.
+func (ghost *Ghost) acceptsName(name string, quality database.NameQuality) bool {
+	return quality == database.NameQualityUnranked ||
+		ghost.Name == "" ||
+		ghost.Name == name ||
+		quality >= ghost.NameQuality
+}
+
+// prepareName stores the given name in the ghost if acceptsName allows it.
+// The changed return value is true if the name has to be pushed to Matrix,
+// qualityChanged is true if the stored quality changed.
+func (ghost *Ghost) prepareName(name string, quality database.NameQuality) (changed, qualityChanged bool) {
+	if !ghost.acceptsName(name, quality) {
+		// The current name may have failed to reach Matrix earlier. Push it again now,
+		// as otherwise it would only be retried once a name of the same quality arrives.
+		return !ghost.NameSet, false
+	}
+	if ghost.Name == name && quality != database.NameQualityUnranked && quality < ghost.NameQuality {
+		// The same name reported with a lower quality (e.g. a contact name which matches
+		// the profile name) keeps the better quality.
+		quality = ghost.NameQuality
+	}
+	qualityChanged = ghost.NameQuality != quality
+	ghost.NameQuality = quality
 	if ghost.Name == name && ghost.NameSet {
-		return false
+		return false, qualityChanged
 	}
 	ghost.Name = name
 	ghost.NameSet = false
-	return true
+	return true, qualityChanged
 }
 
+// UpdateName sets the display name of the ghost. The name is treated as unranked,
+// so it always replaces the current name and sets the name quality to unranked.
+// The return value is true if the ghost changed (the name or only its quality).
+// Like before, saving the ghost to the database is up to the caller.
 func (ghost *Ghost) UpdateName(ctx context.Context, name string) bool {
-	if !ghost.prepareName(name) {
-		return false
+	changed, qualityChanged := ghost.prepareName(name, database.NameQualityUnranked)
+	if !changed {
+		return qualityChanged
 	}
 	if err := ghost.Intent.SetDisplayName(ctx, name); err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to set display name")
@@ -334,13 +365,34 @@ func (ghost *Ghost) updateDMPortals(ctx context.Context) {
 	}
 }
 
+// GetNameWithQuality returns the current name of the ghost together with its quality.
+// It takes the ghost's sync lock, so the two values are consistent with each other,
+// e.g. when copying the name to another ghost.
+func (ghost *Ghost) GetNameWithQuality() (string, database.NameQuality) {
+	ghost.syncLock.Lock()
+	defer ghost.syncLock.Unlock()
+	return ghost.Name, ghost.NameQuality
+}
+
 func (ghost *Ghost) UpdateInfo(ctx context.Context, info *UserInfo) {
 	ghost.syncLock.Lock()
 	defer ghost.syncLock.Unlock()
 	oldName := ghost.Name
 	oldAvatar := ghost.AvatarMXC
 
-	nameChanged := info.Name != nil && ghost.prepareName(*info.Name)
+	var nameChanged, nameQualityChanged bool
+	if info.Name != nil {
+		if !ghost.acceptsName(*info.Name, info.NameQuality) {
+			zerolog.Ctx(ctx).Debug().
+				Str("ghost_id", string(ghost.ID)).
+				Str("current_name", ghost.Name).
+				Int("current_name_quality", int(ghost.NameQuality)).
+				Str("rejected_name", *info.Name).
+				Int("rejected_name_quality", int(info.NameQuality)).
+				Msg("Not replacing ghost name with lower quality name")
+		}
+		nameChanged, nameQualityChanged = ghost.prepareName(*info.Name, info.NameQuality)
+	}
 
 	var avatarChanged, avatarMXCChanged bool
 	if info.Avatar != nil {
@@ -357,7 +409,7 @@ func (ghost *Ghost) UpdateInfo(ctx context.Context, info *UserInfo) {
 		contactInfoChanged = ghost.prepareContactInfo(info.Identifiers, info.IsBot, info.ExtraProfile)
 	}
 
-	update := nameChanged || avatarChanged || contactInfoChanged
+	update := nameChanged || nameQualityChanged || avatarChanged || contactInfoChanged
 	if info.ExtraUpdates != nil {
 		update = info.ExtraUpdates(ctx, ghost) || update
 	}
@@ -421,7 +473,8 @@ func (ghost *Ghost) reconcileProfile(ctx context.Context, current *event.MemberE
 	// * the member event has a different value than the bridge database
 	// * the value isn't being updated right after this call
 	nameDrift := ghost.NameSet && ghost.Name != "" && current.Displayname != ghost.Name &&
-		(updatedProfile == nil || updatedProfile.Name == nil || *updatedProfile.Name == ghost.Name)
+		(updatedProfile == nil || updatedProfile.Name == nil || *updatedProfile.Name == ghost.Name ||
+			!ghost.acceptsName(*updatedProfile.Name, updatedProfile.NameQuality))
 	avatarDrift := ghost.AvatarSet && ghost.AvatarMXC != "" && current.AvatarURL != ghost.AvatarMXC &&
 		(updatedProfile == nil || updatedProfile.Avatar == nil || updatedProfile.Avatar.ID == ghost.AvatarID)
 	// Also don't allow re-setting too often, because there might be multiple in-flight room syncs

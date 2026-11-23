@@ -74,6 +74,30 @@ func (ep *ExtraProfile) CopyTo(dest *ExtraProfile) (changed bool) {
 	return
 }
 
+// NameQuality ranks how good a ghost's display name is. Ghosts are shared by
+// all logins on a bridge, and different logins may know different names for
+// the same remote user (for example, one login only knows a phone number while
+// another knows the user's profile name). When a network connector ranks the
+// names it provides, a name of lower quality will not replace a better one.
+//
+// The zero value, NameQualityUnranked, means the connector doesn't rank names.
+// Unranked names are always accepted, which is the behaviour for connectors
+// that don't use name quality at all.
+type NameQuality int
+
+const (
+	// NameQualityUnranked means the quality of the name is not known.
+	NameQualityUnranked NameQuality = 0
+	// NameQualityIdentifier is a name built only from identifiers,
+	// such as a phone number, username or internal user ID.
+	NameQualityIdentifier NameQuality = 100
+	// NameQualityProfile is a name the remote user set for themselves,
+	// such as a profile name or a business name.
+	NameQualityProfile NameQuality = 200
+	// NameQualityContact is a name from a contact list.
+	NameQualityContact NameQuality = 300
+)
+
 type Ghost struct {
 	BridgeID networkid.BridgeID
 	ID       networkid.UserID
@@ -83,6 +107,7 @@ type Ghost struct {
 	AvatarHash     [32]byte
 	AvatarMXC      id.ContentURIString
 	NameSet        bool
+	NameQuality    NameQuality
 	AvatarSet      bool
 	ContactInfoSet bool
 	IsBot          bool
@@ -94,7 +119,7 @@ type Ghost struct {
 const (
 	getGhostBaseQuery = `
 		SELECT bridge_id, id, name, avatar_id, avatar_hash, avatar_mxc,
-		       name_set, avatar_set, contact_info_set, is_bot, identifiers, extra_profile, metadata
+		       name_set, name_quality, avatar_set, contact_info_set, is_bot, identifiers, extra_profile, metadata
 		FROM ghost
 	`
 	getGhostByIDQuery       = getGhostBaseQuery + `WHERE bridge_id=$1 AND id=$2`
@@ -102,14 +127,14 @@ const (
 	insertGhostQuery        = `
 		INSERT INTO ghost (
 			bridge_id, id, name, avatar_id, avatar_hash, avatar_mxc,
-			name_set, avatar_set, contact_info_set, is_bot, identifiers, extra_profile, metadata
+			name_set, name_quality, avatar_set, contact_info_set, is_bot, identifiers, extra_profile, metadata
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 	`
 	updateGhostQuery = `
 		UPDATE ghost SET name=$3, avatar_id=$4, avatar_hash=$5, avatar_mxc=$6,
-		                 name_set=$7, avatar_set=$8, contact_info_set=$9, is_bot=$10,
-		                 identifiers=$11, extra_profile=$12, metadata=$13
+		                 name_set=$7, name_quality=$8, avatar_set=$9, contact_info_set=$10, is_bot=$11,
+		                 identifiers=$12, extra_profile=$13, metadata=$14
 		WHERE bridge_id=$1 AND id=$2
 	`
 )
@@ -139,7 +164,7 @@ func (g *Ghost) Scan(row dbutil.Scannable) (*Ghost, error) {
 	err := row.Scan(
 		&g.BridgeID, &g.ID,
 		&g.Name, &g.AvatarID, &avatarHash, &g.AvatarMXC,
-		&g.NameSet, &g.AvatarSet, &g.ContactInfoSet, &g.IsBot,
+		&g.NameSet, &g.NameQuality, &g.AvatarSet, &g.ContactInfoSet, &g.IsBot,
 		dbutil.JSON{Data: &g.Identifiers}, dbutil.JSON{Data: &g.ExtraProfile}, dbutil.JSON{Data: g.Metadata},
 	)
 	if err != nil {
@@ -169,7 +194,7 @@ func (g *Ghost) sqlVariables() []any {
 	return []any{
 		g.BridgeID, g.ID,
 		g.Name, g.AvatarID, avatarHash, g.AvatarMXC,
-		g.NameSet, g.AvatarSet, g.ContactInfoSet, g.IsBot,
+		g.NameSet, g.NameQuality, g.AvatarSet, g.ContactInfoSet, g.IsBot,
 		dbutil.JSON{Data: &g.Identifiers}, dbutil.JSON{Data: g.ExtraProfile}, dbutil.JSON{Data: g.Metadata},
 	}
 }
