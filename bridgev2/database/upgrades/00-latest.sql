@@ -1,4 +1,4 @@
--- v0 -> v33 (compatible with v9+): Latest revision
+-- v0 -> v34 (compatible with v9+): Latest revision
 CREATE TABLE "user" (
 	bridge_id       TEXT NOT NULL,
 	mxid            TEXT NOT NULL,
@@ -78,6 +78,7 @@ CREATE TABLE ghost (
 	avatar_hash      TEXT    NOT NULL,
 	avatar_mxc       TEXT    NOT NULL,
 	name_set         BOOLEAN NOT NULL,
+	name_quality     INTEGER NOT NULL DEFAULT 0,
 	avatar_set       BOOLEAN NOT NULL,
 	contact_info_set BOOLEAN NOT NULL,
 	is_bot           BOOLEAN NOT NULL,
